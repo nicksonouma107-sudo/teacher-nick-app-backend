@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 
@@ -9,7 +9,8 @@ app.use(cors());
 const CONSUMER_KEY = process.env.CONSUMER_KEY;
 const CONSUMER_SECRET = process.env.CONSUMER_SECRET;
 const PASSKEY = process.env.PASSKEY;
-const SHORTCODE = "1379452";
+const SHORTCODE = "1379452"; // Store Number / Head Office Shortcode
+const TILL_NUMBER = "1847817"; // Your Buy Goods Till Number
 
 app.get('/', (req, res) => {
     res.send('Teacher Nick Academy Backend is running live 24/7!');
@@ -65,9 +66,9 @@ app.post('/stkPush', async (req, res) => {
             TransactionType: "CustomerBuyGoodsOnline",
             Amount: Math.round(Number(amount)),
             PartyA: phoneNumber,
-            PartyB: SHORTCODE,
+            PartyB: TILL_NUMBER, // Send to your live Till 1847817
             PhoneNumber: phoneNumber,
-            CallBackURL: "https://teachernick-backend.onrender.com/stkCallback",
+            CallBackURL: "https://teacher-nick-app-backend.onrender.com/stkCallback", // Fixed Render URL
             AccountReference: accountReference || "TeacherNick",
             TransactionDesc: transactionDesc || "Academy Subscription"
         };
