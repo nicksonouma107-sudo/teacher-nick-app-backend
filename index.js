@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(express.json());
@@ -11,6 +12,18 @@ const CONSUMER_SECRET = process.env.CONSUMER_SECRET;
 const PASSKEY = process.env.PASSKEY;
 const SHORTCODE = "1379452"; // Store Number / Head Office Shortcode
 const TILL_NUMBER = "1847817"; // Your Buy Goods Till Number
+
+// Configure Nodemailer for Admin Password Resets
+const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+        user: process.env.EMAIL_USER, // Set in Render Environment Variables
+        pass: process.env.EMAIL_PASS  // Set in Render Environment Variables (App Password)
+    }
+});
+
+// Temporary memory store for password reset verification codes
+const passwordResetCodes = {};
 
 app.get('/', (req, res) => {
     res.send('Teacher Nick Academy Backend is running live 24/7!');
@@ -32,6 +45,8 @@ async function getAccessToken() {
         throw new Error(error.response?.data?.errorMessage || 'Failed to authenticate with Safaricom API');
     }
 }
+
+// ==================== M-PESA STK PUSH ROUTES ====================
 
 app.post('/stkPush', async (req, res) => {
     try {
@@ -101,6 +116,74 @@ app.post('/stkPush', async (req, res) => {
 app.post('/stkCallback', (req, res) => {
     console.log("M-Pesa Callback Received:", JSON.stringify(req.body, null, 2));
     res.status(200).json({ ResultCode: 0, ResultDesc: "Accepted" });
+});
+
+// ==================== ADMIN PASSWORD RESET ROUTES ====================
+
+// 1. Request Reset Code via Email
+app.post('/admin/request-reset', async (req, res) => {
+    try {
+        const { email } = req.body;
+        if (!email) {
+            return res.status(400).json({ success: false, error: "Email is required." });
+        }
+
+        // Generate 6-digit verification code
+        const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = Date.now() + 15 * 60 * 1000; // Code expires in 15 minutes
+
+        passwordResetCodes[email] = { code: resetCode, expiresAt };
+
+        const mailOptions = {
+            from: '"Teacher Nick Academy" <no-reply@teachernick.com>',
+            to: email,
+            subject: 'Admin Password Reset Verification Code',
+            text: `Your verification code to reset your admin password is: ${resetCode}\n\nThis code is valid for 15 minutes.`
+        };
+
+        await transporter.sendMail(mailOptions);
+        console.log(`Password reset code sent to ${email}`);
+
+        return res.status(200).json({ success: true, message: "Verification code sent to email successfully." });
+    } catch (error) {
+        console.error("Reset Request Error:", error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// 2. Verify Code and Complete Password Reset
+app.post('/admin/verify-and-reset', async (req, res) => {
+    try {
+        const { email, code, newPassword } = req.body;
+        if (!email || !code || !newPassword) {
+            return res.status(400).json({ success: false, error: "Email, code, and new password are required." });
+        }
+
+        const record = passwordResetCodes[email];
+        if (!record) {
+            return res.status(400).json({ success: false, error: "No active reset request found for this email." });
+        }
+
+        if (Date.now() > record.expiresAt) {
+            delete passwordResetCodes[email];
+            return res.status(400).json({ success: false, error: "Reset code has expired. Please request a new one." });
+        }
+
+        if (record.code !== code) {
+            return res.status(400).json({ success: false, error: "Invalid verification code." });
+        }
+
+        // Code is correct, clear it
+        delete passwordResetCodes[email];
+
+        // Note: Update your database or Firebase Auth user password here if needed
+        console.log(`Admin password successfully reset for: ${email}`);
+
+        return res.status(200).json({ success: true, message: "Password reset successfully." });
+    } catch (error) {
+        console.error("Verify & Reset Error:", error);
+        return res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 const PORT = process.env.PORT || 3000;
