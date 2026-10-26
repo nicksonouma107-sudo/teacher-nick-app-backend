@@ -9,7 +9,7 @@ app.use(cors());
 const CONSUMER_KEY = process.env.CONSUMER_KEY;
 const CONSUMER_SECRET = process.env.CONSUMER_SECRET;
 const PASSKEY = process.env.PASSKEY;
-const SHORTCODE = "1847817";
+const SHORTCODE = "1379452";
 
 app.get('/', (req, res) => {
     res.send('Teacher Nick Academy Backend is running live 24/7!');
