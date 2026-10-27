@@ -4,10 +4,24 @@ const axios = require('axios');
 const nodemailer = require('nodemailer');
 const admin = require('firebase-admin');
 
-// Initialize Firebase Admin (Ensure your FIREBASE_SERVICE_ACCOUNT or default credentials are set on Render)
-admin.initializeApp({
-    credential: admin.credential.applicationDefault()
-});
+// Initialize Firebase Admin safely for Render environment
+try {
+    if (process.env.FIREBASE_PRIVATE_KEY) {
+        admin.initializeApp({
+            credential: admin.credential.cert({
+                projectId: process.env.FIREBASE_PROJECT_ID,
+                clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+                privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
+            })
+        });
+    } else {
+        // Fallback initialization if environment credentials are managed via default GCP runtime
+        admin.initializeApp();
+    }
+    console.log("Firebase Admin Initialized Successfully.");
+} catch (error) {
+    console.error("Firebase Initialization Warning:", error.message);
+}
 
 const app = express();
 app.use(express.json());
