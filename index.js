@@ -2,6 +2,12 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const nodemailer = require('nodemailer');
+const admin = require('firebase-admin');
+
+// Initialize Firebase Admin (Ensure your FIREBASE_SERVICE_ACCOUNT or default credentials are set on Render)
+admin.initializeApp({
+    credential: admin.credential.applicationDefault()
+});
 
 const app = express();
 app.use(express.json());
@@ -22,8 +28,10 @@ const transporter = nodemailer.createTransport({
     }
 });
 
-// Temporary memory store for password reset verification codes
+// Temporary memory stores
 const passwordResetCodes = {};
+const pendingTransactions = {}; // Maps CheckoutRequestID -> { userId, documentId }
+const transactionStatuses = {}; // Maps CheckoutRequestID -> { resultCode }
 
 app.get('/', (req, res) => {
     res.send('Teacher Nick Academy Backend is running live 24/7!');
@@ -50,7 +58,7 @@ async function getAccessToken() {
 
 app.post('/stkPush', async (req, res) => {
     try {
-        const { phoneNumber, amount, accountReference, transactionDesc } = req.body;
+        const { phoneNumber, amount, userId, documentId, accountReference, transactionDesc } = req.body;
 
         if (!phoneNumber || !amount) {
             return res.status(400).json({ success: false, error: "Phone number and amount are required." });
@@ -99,10 +107,21 @@ app.post('/stkPush', async (req, res) => {
             }
         );
 
+        const checkoutRequestId = response.data.CheckoutRequestID;
+
+        // Save metadata temporarily against this CheckoutRequestID so callback knows what user/doc to unlock
+        if (checkoutRequestId) {
+            pendingTransactions[checkoutRequestId] = {
+                userId: userId || "",
+                documentId: documentId || ""
+            };
+        }
+
         console.log("STK Push Success:", response.data);
         return res.status(200).json({
             success: true,
             message: "STK Push initiated successfully",
+            CheckoutRequestID: checkoutRequestId,
             data: response.data
         });
 
@@ -113,14 +132,93 @@ app.post('/stkPush', async (req, res) => {
     }
 });
 
-app.post('/stkCallback', (req, res) => {
-    console.log("M-Pesa Callback Received:", JSON.stringify(req.body, null, 2));
-    res.status(200).json({ ResultCode: 0, ResultDesc: "Accepted" });
+// M-Pesa Callback route handling tiered permissions securely
+app.post('/stkCallback', async (req, res) => {
+    try {
+        console.log("M-Pesa Callback Received:", JSON.stringify(req.body, null, 2));
+
+        const callbackData = req.body.Body?.stkCallback;
+        if (!callbackData) {
+            return res.status(400).json({ ResultCode: 1, ResultDesc: "Invalid callback structure" });
+        }
+
+        const checkoutRequestId = callbackData.CheckoutRequestID;
+        const resultCode = callbackData.ResultCode.toString(); // "0" = success
+
+        // Save result code for app polling immediately
+        transactionStatuses[checkoutRequestId] = { resultCode };
+
+        if (resultCode === "0") {
+            const metadataItems = callbackData.CallbackMetadata?.Item || [];
+            let amountPaid = 0;
+
+            metadataItems.forEach(item => {
+                if (item.Name === "Amount") {
+                    amountPaid = Number(item.Value);
+                }
+            });
+
+            const pendingTx = pendingTransactions[checkoutRequestId];
+            if (pendingTx && pendingTx.userId) {
+                const { userId, documentId } = pendingTx;
+                const now = Date.now();
+                const db = admin.firestore();
+
+                if (amountPaid === 50 && documentId) {
+                    // Tier 1: Unlock only this specific document ID (50 KES)
+                    await db.collection("users").doc(userId).set({
+                        unlockedDocuments: {
+                            [documentId]: true
+                        }
+                    }, { merge: true });
+                    console.log(`Unlocked single document ${documentId} for user ${userId}`);
+
+                } else if (amountPaid === 299) {
+                    // Tier 2: 30 Days All Access (299 KES)
+                    const expiryDate = now + (30 * 24 * 60 * 60 * 1000);
+                    await db.collection("users").doc(userId).set({
+                        isSubscribed: true,
+                        subscriptionExpiry: expiryDate
+                    }, { merge: true });
+                    console.log(`Granted 30-day subscription for user ${userId}`);
+
+                } else if (amountPaid === 1500) {
+                    // Tier 3: 365 Days All Access (1500 KES)
+                    const expiryDate = now + (365 * 24 * 60 * 60 * 1000);
+                    await db.collection("users").doc(userId).set({
+                        isSubscribed: true,
+                        subscriptionExpiry: expiryDate
+                    }, { merge: true });
+                    console.log(`Granted 365-day subscription for user ${userId}`);
+                }
+            }
+        }
+
+        res.status(200).json({ ResultCode: 0, ResultDesc: "Accepted" });
+    } catch (error) {
+        console.error("Callback Processing Error:", error);
+        res.status(500).json({ ResultCode: 1, ResultDesc: error.message });
+    }
+});
+
+// Payment Status Polling route for Android App
+app.get('/paymentStatus', (req, res) => {
+    const { checkoutRequestId } = req.query;
+
+    if (!checkoutRequestId) {
+        return res.status(400).json({ error: "Missing checkoutRequestId" });
+    }
+
+    const txStatus = transactionStatuses[checkoutRequestId];
+    if (txStatus) {
+        return res.status(200).json({ resultCode: txStatus.resultCode });
+    } else {
+        return res.status(200).json({ resultCode: "PENDING" });
+    }
 });
 
 // ==================== ADMIN PASSWORD RESET ROUTES ====================
 
-// 1. Request Reset Code via Email
 app.post('/admin/request-reset', async (req, res) => {
     try {
         const { email } = req.body;
@@ -128,9 +226,8 @@ app.post('/admin/request-reset', async (req, res) => {
             return res.status(400).json({ success: false, error: "Email is required." });
         }
 
-        // Generate 6-digit verification code
         const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiresAt = Date.now() + 15 * 60 * 1000; // Code expires in 15 minutes
+        const expiresAt = Date.now() + 15 * 60 * 1000;
 
         passwordResetCodes[email] = { code: resetCode, expiresAt };
 
@@ -151,7 +248,6 @@ app.post('/admin/request-reset', async (req, res) => {
     }
 });
 
-// 2. Verify Code and Complete Password Reset
 app.post('/admin/verify-and-reset', async (req, res) => {
     try {
         const { email, code, newPassword } = req.body;
@@ -173,10 +269,7 @@ app.post('/admin/verify-and-reset', async (req, res) => {
             return res.status(400).json({ success: false, error: "Invalid verification code." });
         }
 
-        // Code is correct, clear it
         delete passwordResetCodes[email];
-
-        // Note: Update your database or Firebase Auth user password here if needed
         console.log(`Admin password successfully reset for: ${email}`);
 
         return res.status(200).json({ success: true, message: "Password reset successfully." });
