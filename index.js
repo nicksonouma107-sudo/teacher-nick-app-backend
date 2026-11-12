@@ -33,11 +33,14 @@ const PASSKEY = process.env.PASSKEY;
 const SHORTCODE = "1379452"; // Store Number / Head Office Shortcode
 const TILL_NUMBER = "1847817"; // Your Buy Goods Till Number
 
-// Configure Nodemailer for Admin Password Resets
+// Authorized Admin Emails restriction
+const ALLOWED_ADMINS = ['eliasouma11@gmail.com', 'nicksonouma107@gmail.com'];
+
+// Configure Nodemailer for Admin Password Resets using eliasouma11@gmail.com
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
-        user: process.env.EMAIL_USER, // Set in Render Environment Variables
+        user: process.env.EMAIL_USER || 'eliasouma11@gmail.com', // Set in Render Environment Variables
         pass: process.env.EMAIL_PASS  // Set in Render Environment Variables (App Password)
     }
 });
@@ -105,7 +108,7 @@ app.post('/stkPush', async (req, res) => {
             PartyA: phoneNumber,
             PartyB: TILL_NUMBER, // Send to your live Till 1847817
             PhoneNumber: phoneNumber,
-            CallBackURL: "https://teacher-nick-app-backend.onrender.com/stkCallback", // Fixed Render URL
+            CallBackURL: "https://teacher-nick-app-backend.onrender.com/stkCallback",
             AccountReference: accountReference || "TeacherNick",
             TransactionDesc: transactionDesc || "Academy Subscription"
         };
@@ -123,7 +126,6 @@ app.post('/stkPush', async (req, res) => {
 
         const checkoutRequestId = response.data.CheckoutRequestID;
 
-        // Save metadata temporarily against this CheckoutRequestID so callback knows what user/doc to unlock
         if (checkoutRequestId) {
             pendingTransactions[checkoutRequestId] = {
                 userId: userId || "",
@@ -146,7 +148,6 @@ app.post('/stkPush', async (req, res) => {
     }
 });
 
-// M-Pesa Callback route handling tiered permissions securely
 app.post('/stkCallback', async (req, res) => {
     try {
         console.log("M-Pesa Callback Received:", JSON.stringify(req.body, null, 2));
@@ -157,9 +158,8 @@ app.post('/stkCallback', async (req, res) => {
         }
 
         const checkoutRequestId = callbackData.CheckoutRequestID;
-        const resultCode = callbackData.ResultCode.toString(); // "0" = success
+        const resultCode = callbackData.ResultCode.toString();
 
-        // Save result code for app polling immediately
         transactionStatuses[checkoutRequestId] = { resultCode };
 
         if (resultCode === "0") {
@@ -179,7 +179,6 @@ app.post('/stkCallback', async (req, res) => {
                 const db = admin.firestore();
 
                 if (amountPaid === 50 && documentId) {
-                    // Tier 1: Unlock only this specific document ID (50 KES)
                     await db.collection("users").doc(userId).set({
                         unlockedDocuments: {
                             [documentId]: true
@@ -188,7 +187,6 @@ app.post('/stkCallback', async (req, res) => {
                     console.log(`Unlocked single document ${documentId} for user ${userId}`);
 
                 } else if (amountPaid === 299) {
-                    // Tier 2: 30 Days All Access (299 KES)
                     const expiryDate = now + (30 * 24 * 60 * 60 * 1000);
                     await db.collection("users").doc(userId).set({
                         isSubscribed: true,
@@ -197,7 +195,6 @@ app.post('/stkCallback', async (req, res) => {
                     console.log(`Granted 30-day subscription for user ${userId}`);
 
                 } else if (amountPaid === 1500) {
-                    // Tier 3: 365 Days All Access (1500 KES)
                     const expiryDate = now + (365 * 24 * 60 * 60 * 1000);
                     await db.collection("users").doc(userId).set({
                         isSubscribed: true,
@@ -215,7 +212,6 @@ app.post('/stkCallback', async (req, res) => {
     }
 });
 
-// Payment Status Polling route for Android App
 app.get('/paymentStatus', (req, res) => {
     const { checkoutRequestId } = req.query;
 
@@ -231,65 +227,97 @@ app.get('/paymentStatus', (req, res) => {
     }
 });
 
-// ==================== ADMIN PASSWORD RESET ROUTES ====================
+// ==================== ADMIN PASSWORD RESET ROUTES (3-STEP) ====================
 
-app.post('/admin/request-reset', async (req, res) => {
+// Step 1: Request Password Reset OTP
+app.post('/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) {
-            return res.status(400).json({ success: false, error: "Email is required." });
+            return res.status(400).json({ success: false, message: "Email is required." });
+        }
+
+        if (!ALLOWED_ADMINS.includes(email)) {
+            return res.status(403).json({ success: false, message: "Unauthorized admin email." });
         }
 
         const resetCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiresAt = Date.now() + 15 * 60 * 1000;
+        const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes expiry
 
         passwordResetCodes[email] = { code: resetCode, expiresAt };
 
         const mailOptions = {
-            from: '"Teacher Nick Academy" <no-reply@teachernick.com>',
+            from: '"Teacher Nick Academy" <eliasouma11@gmail.com>',
             to: email,
-            subject: 'Admin Password Reset Verification Code',
-            text: `Your verification code to reset your admin password is: ${resetCode}\n\nThis code is valid for 15 minutes.`
+            subject: 'Teacher Nick Academy - Admin Password Reset Code',
+            text: `Your verification code to reset your admin password is: ${resetCode}\n\nThis code is valid for 10 minutes.`
         };
 
         await transporter.sendMail(mailOptions);
-        console.log(`Password reset code sent to ${email}`);
+        console.log(`Password reset OTP sent to admin: ${email}`);
 
         return res.status(200).json({ success: true, message: "Verification code sent to email successfully." });
     } catch (error) {
-        console.error("Reset Request Error:", error);
-        return res.status(500).json({ success: false, error: error.message });
+        console.error("Forgot Password Error:", error);
+        return res.status(500).json({ success: false, message: error.message });
     }
 });
 
-app.post('/admin/verify-and-reset', async (req, res) => {
+// Step 2: Verify OTP Code
+app.post('/verify-otp', (req, res) => {
     try {
-        const { email, code, newPassword } = req.body;
-        if (!email || !code || !newPassword) {
-            return res.status(400).json({ success: false, error: "Email, code, and new password are required." });
+        const { email, code } = req.body;
+        if (!email || !code) {
+            return res.status(400).json({ success: false, message: "Email and code are required." });
         }
 
         const record = passwordResetCodes[email];
         if (!record) {
-            return res.status(400).json({ success: false, error: "No active reset request found for this email." });
+            return res.status(400).json({ success: false, message: "No active reset request found for this email." });
         }
 
         if (Date.now() > record.expiresAt) {
             delete passwordResetCodes[email];
-            return res.status(400).json({ success: false, error: "Reset code has expired. Please request a new one." });
+            return res.status(400).json({ success: false, message: "Verification code has expired." });
         }
 
         if (record.code !== code) {
-            return res.status(400).json({ success: false, error: "Invalid verification code." });
+            return res.status(400).json({ success: false, message: "Invalid verification code." });
         }
 
-        delete passwordResetCodes[email];
-        console.log(`Admin password successfully reset for: ${email}`);
-
-        return res.status(200).json({ success: true, message: "Password reset successfully." });
+        return res.status(200).json({ success: true, message: "Code verified successfully." });
     } catch (error) {
-        console.error("Verify & Reset Error:", error);
-        return res.status(500).json({ success: false, error: error.message });
+        console.error("Verify OTP Error:", error);
+        return res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+// Step 3: Update Password in Firebase Auth
+app.post('/reset-password', async (req, res) => {
+    try {
+        const { email, newPassword } = req.body;
+        if (!email || !newPassword) {
+            return res.status(400).json({ success: false, message: "Email and new password are required." });
+        }
+
+        if (!ALLOWED_ADMINS.includes(email)) {
+            return res.status(403).json({ success: false, message: "Unauthorized." });
+        }
+
+        // Find user by email in Firebase Auth and update password
+        const userRecord = await admin.auth().getUserByEmail(email);
+        await admin.auth().updateUser(userRecord.uid, {
+            password: newPassword
+        });
+
+        // Clear code from memory
+        delete passwordResetCodes[email];
+        console.log(`Admin password updated successfully in Firebase Auth for: ${email}`);
+
+        return res.status(200).json({ success: true, message: "Password updated successfully!" });
+    } catch (error) {
+        console.error("Reset Password Error:", error);
+        return res.status(500).json({ success: false, message: error.message });
     }
 });
 
